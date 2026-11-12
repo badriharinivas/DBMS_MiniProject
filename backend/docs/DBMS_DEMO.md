@@ -105,7 +105,21 @@ FROM match_open_projects(
 );
 ```
 
-The view reports counts for open projects. The function returns open projects ranked by cosine similarity to the chosen student's interest embedding. If there are no interest rows, create a student and profile through the API first. It clamps its requested result limit to 1–100.
+The view reports counts for open projects. The function returns open projects ranked by cosine similarity to the chosen student's interest embedding. The recommendations API calls the same function, then joins its results to faculty and department rows. If there are no interest rows, create a student and profile through the API first. The function clamps its requested result limit to 1–100.
+
+The faculty application-status endpoint calls the `mentormatch_set_application_status` procedure after checking the application's owner and current status. To inspect it, use `\dfp mentormatch_set_application_status`. To demonstrate the procedure without keeping a change, find a pending application's `id` and owning faculty's `faculty_id`, then run this in a transaction in pgAdmin's Query Tool and roll it back:
+
+```sql
+BEGIN;
+CALL mentormatch_set_application_status(
+    'PENDING_APPLICATION_UUID'::uuid,
+    'OWNING_FACULTY_UUID'::uuid,
+    'ACCEPTED'
+);
+ROLLBACK;
+```
+
+The application-list API also uses a correlated `EXISTS` subquery to verify project ownership while it reads application rows. Its implementation is in `app/api/routes/applications.py`.
 
 ## 5. Full-text and vector search
 

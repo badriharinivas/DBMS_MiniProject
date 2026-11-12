@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -48,7 +48,15 @@ def list_project_applications(project_id: uuid.UUID, offset: int = Query(default
         raise HTTPException(status_code=404, detail="Project not found")
     if project.faculty_id != faculty.id:
         raise HTTPException(status_code=403, detail="You can only review applications to your own projects")
-    return db.scalars(select(Application).where(Application.project_id == project_id)
+    # Correlated EXISTS rechecks project ownership in the same query that reads
+    # applications, in addition to the explicit 404/403 checks above.
+    owned_project = (
+        select(FacultyProject.id)
+        .where(FacultyProject.id == Application.project_id, FacultyProject.faculty_id == faculty.id)
+        .correlate(Application)
+        .exists()
+    )
+    return db.scalars(select(Application).where(Application.project_id == project_id, owned_project)
                       .order_by(Application.created_at.desc()).offset(offset).limit(limit)).all()
 
 
@@ -62,7 +70,14 @@ def update_application_status(application_id: uuid.UUID, payload: ApplicationSta
         raise HTTPException(status_code=403, detail="You can only review applications to your own projects")
     if application.status != ApplicationStatus.PENDING:
         raise HTTPException(status_code=409, detail="Only pending applications can change status")
-    application.status = payload.status
+    db.execute(
+        text("CALL mentormatch_set_application_status(:application_id, :faculty_id, :new_status)"),
+        {
+            "application_id": application.id,
+            "faculty_id": faculty.id,
+            "new_status": payload.status.value,
+        },
+    )
     db.commit()
     db.refresh(application)
     return application

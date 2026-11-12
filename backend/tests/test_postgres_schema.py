@@ -22,6 +22,10 @@ def test_postgresql_migration_objects_and_matching_behavior():
             ).scalars()
         )
         assert {"match_open_projects", "mentormatch_touch_updated_at"} <= object_names
+        assert "mentormatch_set_application_status" in object_names
+        assert connection.execute(
+            text("SELECT routine_type FROM information_schema.routines WHERE routine_schema='public' AND routine_name='mentormatch_set_application_status'")
+        ).scalar_one() == "PROCEDURE"
         assert connection.execute(
             text("SELECT to_regclass('public.open_projects_with_application_stats')")
         ).scalar_one() is not None
@@ -77,6 +81,20 @@ def test_postgresql_migration_objects_and_matching_behavior():
             text("SELECT application_count FROM open_projects_with_application_stats WHERE project_id=:project"),
             {"project": project_id},
         ).scalar_one() == 0
+
+        application_id = uuid.uuid4()
+        connection.execute(
+            text("INSERT INTO applications (id,student_id,project_id,message) VALUES (:id,:student,:project,'Procedure verification')"),
+            {"id": application_id, "student": student_id, "project": project_id},
+        )
+        connection.execute(
+            text("CALL mentormatch_set_application_status(:application,:faculty,'ACCEPTED')"),
+            {"application": application_id, "faculty": faculty_id},
+        )
+        assert connection.execute(
+            text("SELECT status FROM applications WHERE id=:application"),
+            {"application": application_id},
+        ).scalar_one() == "ACCEPTED"
         search_match = connection.execute(
             text("SELECT search_vector @@ plainto_tsquery('english', 'quantum materials') FROM faculty_projects WHERE id=:project"),
             {"project": project_id},

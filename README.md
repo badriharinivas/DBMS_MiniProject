@@ -1,283 +1,132 @@
-# MentorMatch backend
+# MentorMatch
 
-MentorMatch is a FastAPI and PostgreSQL backend for connecting student research interests with faculty projects. The database layer uses SQLAlchemy, Alembic, PostgreSQL arrays and full-text search, and pgvector.
+MentorMatch connects students with faculty-led research opportunities. This repository contains the verified FastAPI/PostgreSQL backend and a separate Next.js frontend.
 
-## Database schema
+## Repository layout
+
+- `backend/` — FastAPI API, SQLAlchemy models, Alembic migrations, tests, database demo guide, and backend environment example.
+- `frontend/` — Next.js App Router application for student and faculty workflows.
+- `backend/README.md` — complete backend setup, API contract, database architecture, and DBMS demonstration notes.
+
+## Start the backend
+
+Use PostgreSQL with the `pgvector` extension enabled. Configure the backend environment and run these commands in PowerShell from the repository root:
+
+```powershell
+Set-Location .\backend
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# Edit .env locally: configure DATABASE_URL and a private JWT_SECRET_KEY (at least 32 characters).
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+alembic upgrade head
+python -m uvicorn app.main:app --reload
+```
+
+The database must be running and ready before migrations. Departments are provisioned administratively; registration cannot proceed until at least one department exists. The backend's default browser CORS origin includes `http://localhost:3000`. See [backend/README.md](backend/README.md) for PostgreSQL/pgvector details, embedding setup, endpoint contracts, test instructions, and safe DBMS demonstrations.
+
+## Start the frontend
+
+In a second PowerShell terminal, from the repository root:
+
+```powershell
+Set-Location .\frontend
+Copy-Item .env.example .env.local
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. The frontend API base defaults to `http://127.0.0.1:8000/api/v1`; set `NEXT_PUBLIC_API_BASE_URL` in `frontend/.env.local` if the backend uses another origin. Add the frontend's exact origin to the backend `CORS_ORIGINS` setting if it is not `http://localhost:3000`.
+
+## Workflows
+
+- Students register with a department, sign in, browse or search open faculty projects, create an interest profile, get semantic recommendations, apply with a message, and track each application status.
+- Faculty register with a department, sign in, create and edit projects, close or reopen their projects, review applications to their own projects, and accept or reject pending applications.
+- The frontend calls the FastAPI service over HTTP. The API authenticates protected requests with bearer tokens and reads or writes PostgreSQL through SQLAlchemy. The browser never connects directly to PostgreSQL.
+
+## Application workflow
 
 ```mermaid
-erDiagram
-    DEPARTMENTS ||--o{ USERS : contains
-    USERS ||--o{ FACULTY_PROJECTS : owns
-    USERS ||--o| STUDENT_INTERESTS : has
-    USERS ||--o{ APPLICATIONS : submits
-    FACULTY_PROJECTS ||--o{ APPLICATIONS : receives
-    DEPARTMENTS {
-        uuid id PK
-        string name UK
-        text description
-    }
-    USERS {
-        uuid id PK
-        string name
-        string email UK
-        string password_hash
-        string role
-        uuid department_id FK
-        timestamptz created_at
-    }
-    FACULTY_PROJECTS {
-        uuid id PK
-        uuid faculty_id FK
-        string title
-        text description
-        varchar[] required_skills
-        string status
-        vector_384 embedding
-        tsvector search_vector
-        timestamptz created_at
-        timestamptz updated_at
-    }
-    STUDENT_INTERESTS {
-        uuid id PK
-        uuid student_id FK_UK
-        text description
-        varchar[] skills
-        vector_384 embedding
-        timestamptz updated_at
-    }
-    APPLICATIONS {
-        uuid id PK
-        uuid student_id FK
-        uuid project_id FK
-        text message
-        string status
-        timestamptz created_at
-        timestamptz updated_at
-    }
+flowchart TD
+    A[Register as student or faculty] --> B[Choose a department]
+    B --> C[Sign in and receive bearer token]
+    C --> D{Account role}
+    D -->|Student| E[Browse or search open projects]
+    E --> F[Save interests and skills]
+    F --> G[View semantic recommendations]
+    E --> H[Apply to an open project]
+    G --> H
+    H --> I[Track application status]
+    D -->|Faculty| J[Create or update projects]
+    J --> K[Review applicants to owned projects]
+    K --> L[Accept or reject pending applications]
+    J --> M[Close or reopen project]
 ```
 
-`RESTRICT` on department, faculty owner, student application, and project application references protects records with dependent history. Student interest profiles cascade with their student account. A unique student ID enforces one interest profile per student, and a unique student/project pair prevents duplicate applications. Role and status checks constrain stored values. Faculty/student ownership role checks belong in the API/service layer.
+### Student flow
 
-## Database setup and migrations
+1. **Register and sign in.** The student submits a name, unique email, password, role, and department. The API hashes the password and returns a bearer token after login.
+2. **Discover projects.** Browse open projects or search by keywords. Project search uses PostgreSQL full-text search over titles, descriptions, and skills.
+3. **Create an interest profile.** Save a description and skills. The API generates a 384-dimensional embedding for semantic matching.
+4. **Get recommendations.** The API compares the student's interest embedding with open project embeddings using cosine distance and returns the closest matches.
+5. **Apply and track.** Submit a message to an open project. A student may apply only once to each project and can view their own application statuses.
 
-Use PostgreSQL with the pgvector extension package available on the server. The migration creates the `vector` extension if it is not already enabled; the migration role must have permission to create it (or an administrator must enable it first). Existing `.env` remains local and must define `DATABASE_URL`. The checked-in `.env.example` shows the variable names and a placeholder URL; do not put real credentials in source control.
+### Faculty flow
 
-In PowerShell, from `backend`:
+1. **Register and sign in** with the faculty role and a department.
+2. **Publish opportunities.** Create projects with a title, description, and required skills. The API prepares search and semantic-matching data for each project.
+3. **Manage projects.** Edit or close/reopen projects owned by the signed-in faculty member. Projects are closed rather than deleted so application history remains intact.
+4. **Review applications.** View applicants only for projects owned by that faculty member. Pending applications can be accepted or rejected; a final decision cannot be changed through the current API.
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
-alembic upgrade head
-alembic current
-```
+## Relational database schema
 
-The configured development database uses `localhost:5433`. Do not run `alembic downgrade` against a database with data unless you have reviewed the migration and have an approved backup/recovery plan.
+MentorMatch uses a normalized relational schema in PostgreSQL. In this two-dimensional table model, each table stores one kind of entity, each row is one record, and each column stores one attribute. UUID primary keys identify records; foreign keys connect related records.
 
-### Seed development demo data
+#### Chen ER diagram
 
-After configuring `.env` and applying migrations, run this from `backend` to populate the configured local development database:
+![MentorMatch conceptual ER diagram in Chen notation](backend/docs/chen-er-diagram.png)
 
-```powershell
-python -m app.scripts.seed_demo_data
-```
+The Chen diagram uses rectangles for entities, diamonds for relationships, and ovals for attributes. `USER.role` distinguishes students and faculty; the conceptual relationships and cardinalities are shown directly.
 
-The script creates synthetic demo accounts, projects, student interest profiles, and applications using stable lookup markers. It is idempotent: rerunning it does not create duplicate demo records, and it refuses to overwrite unrelated records. The script only runs when `APP_ENV` identifies a development environment and the database is on localhost port `5433`. If demo accounts need to be created, provide `MENTORMATCH_DEMO_PASSWORD` with at least 12 characters, or use the secure reset flow below.
+#### Relational schema diagram
 
-To set a new shared password for the five seeded demo accounts, run:
+![MentorMatch relational schema diagram showing all tables, columns, keys, and relationships](backend/docs/relational-schema-diagram.png)
 
-```powershell
-python -m app.scripts.seed_demo_data --reset-demo-passwords
-```
+The relational diagram shows all five tables, their columns, primary and foreign keys, key PostgreSQL data types, and relationship cardinalities.
 
-When `MENTORMATCH_DEMO_PASSWORD` is not set, the script prompts twice using a hidden password input. It stores only Argon2 password hashes and does not print the password. Existing demo account passwords are not changed by a normal seed run.
+### Tables and relationships
 
-### PostgreSQL concepts in the initial migration
-
-- `vector(384)` stores application-generated embeddings. An IVFFlat cosine index supports nearest-neighbor search; embeddings must be generated by one consistent 384-dimensional model in the application.
-- A GIN-indexed `tsvector` combines project title, description, and required skills. A faculty-project trigger maintains it on insert/update and also maintains `updated_at`; triggers on interests and applications maintain their update timestamps.
-- `mentormatch_touch_updated_at()` maintains project search data and timestamps on projects, and timestamps on interests/applications.
-- `match_open_projects(student_uuid, limit)` returns open projects ordered by cosine similarity to that student's interest embedding.
-- `open_projects_with_application_stats` exposes open projects with total and pending application counts.
-
-Inspect these objects after migration with `\d+ faculty_projects`, `\df match_open_projects`, `\dv open_projects_with_application_stats`, and catalog queries on `pg_trigger` / `pg_indexes`.
-
-## API setup and usage
-
-The app reads `JWT_SECRET_KEY` from `.env`. Generate a private key locally (for example, `python -c "import secrets; print(secrets.token_urlsafe(48))"`) and keep it out of Git. The key must be at least 32 characters. `JWT_ALGORITHM` defaults to `HS256`; `ACCESS_TOKEN_EXPIRE_MINUTES` defaults to 30.
-
-Start the development server from `backend` after installing requirements and applying migrations:
-
-```powershell
-python -m uvicorn app.main:app --reload
-```
-
-Open `/docs` for interactive OpenAPI docs. The versioned API base is `/api/v1`; `/health` and `/health/db` remain at the root.
-
-### Endpoint summary
-
-| Method | Path | Access |
-| --- | --- | --- |
-| `POST` | `/api/v1/auth/register` | Public; creates student or faculty account |
-| `POST` | `/api/v1/auth/login` | Public; returns a bearer token |
-| `GET` | `/api/v1/auth/me` | Bearer token |
-| `GET` | `/api/v1/departments` | Public, paginated |
-| `GET` | `/api/v1/departments/{department_id}` | Public |
-| `GET` | `/api/v1/projects` | Public; filter with `status`, `department_id`, `offset`, and `limit` |
-| `GET` | `/api/v1/projects/search?q=...` | Public; open projects, PostgreSQL full-text search |
-| `GET` | `/api/v1/projects/{project_id}` | Public |
-| `POST` | `/api/v1/projects` | Faculty |
-| `PATCH` | `/api/v1/projects/{project_id}` | Owning faculty; may close/reopen |
-| `GET`, `POST`, `PUT` | `/api/v1/students/me/interests` | Student; only the current user's profile |
-| `GET` | `/api/v1/recommendations?limit=10` | Student; personalized semantic matches |
-| `POST` | `/api/v1/projects/{project_id}/applications` | Student; only to an open project |
-| `GET` | `/api/v1/applications/me` | Student; own applications |
-| `GET` | `/api/v1/projects/{project_id}/applications` | Faculty owner of project |
-| `PATCH` | `/api/v1/applications/{application_id}/status` | Faculty owner; pending to accepted/rejected |
-
-There is no project-delete endpoint; close projects to preserve application history. Departments are read-only through the public API and are provisioned administratively.
-
-### Example requests
-
-```http
-POST /api/v1/auth/register
-Content-Type: application/json
-
-{"name":"Asha Rao","email":"asha@example.edu","password":"ChangeThis12345","role":"STUDENT","department_id":"<department-uuid>"}
-```
-
-```http
-POST /api/v1/auth/login
-Content-Type: application/json
-
-{"email":"asha@example.edu","password":"ChangeThis12345"}
-```
-
-Use the returned `access_token` as `Authorization: Bearer <token>`. Authenticated responses include safe profile fields only; password hashes are never serialized.
-
-```http
-POST /api/v1/students/me/interests
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{"description":"I am interested in natural language processing and responsible AI.","skills":["Python","NLP"]}
-```
-
-```http
-POST /api/v1/projects
-Authorization: Bearer <faculty-token>
-Content-Type: application/json
-
-{"title":"Responsible language tools","description":"Study robust methods for evaluating language models.","required_skills":["Python","NLP"]}
-```
-
-```http
-POST /api/v1/projects/<project-uuid>/applications
-Authorization: Bearer <student-token>
-Content-Type: application/json
-
-{"message":"I have completed relevant coursework and would like to contribute to the evaluation work."}
-```
-
-### Semantic recommendations and keyword search
-
-The `EmbeddingProvider` loads `sentence-transformers/all-MiniLM-L6-v2` lazily on the first project or interest write, caches it for the process, and normalizes input text and output vectors. The model maps text into 384 dimensions and supports semantic similarity. New model downloads require network access to Hugging Face on first use; model weights are approximately 90 MB (22.7 million parameters) in float32, in addition to the Python/PyTorch runtime and inference memory. CPU inference is configured by default. The model truncates inputs beyond 256 word pieces. If model setup or inference fails, writes return `503` and no zero-vector fallback is stored.
-
-Upgrade the project environment with `python -m pip install -r requirements-dev.txt`; model weights download when first needed. For offline setup, warm the cache on a networked machine and configure the Hugging Face cache for the server before starting it.
-
-After upgrading from the Phase 3 placeholder implementation, replace any existing zero vectors with real values using this resumable, batched command:
-
-```powershell
-python -m app.scripts.backfill_embeddings --batch-size 100
-```
-
-The command updates only rows whose vector norm is zero, commits each batch, and can be rerun safely. It stops with an error if the model is unavailable. Check for remaining placeholders with `SELECT count(*) FROM faculty_projects WHERE vector_norm(embedding) = 0;` and the equivalent query on `student_interests`.
-
-Recommendations obtain the student's interest profile from the bearer token, compare its embedding with nonzero project vectors by pgvector cosine distance, include open projects only, and return `similarity = 1 - cosine_distance` (higher is closer; cosine similarity ranges from -1 to 1). Missing profiles return `404`; zero/uninitialized student vectors return `409`. The response includes project title/description/skills plus faculty name and department, and never returns vectors.
-
-`GET /api/v1/projects/search?q=neural%20language&limit=10&offset=0` is a separate lexical search. It uses PostgreSQL `plainto_tsquery`, the trigger-maintained `tsvector`, and its GIN index over title, description, and skills. It returns open projects with rank ordering; blank queries return `422`. Semantic recommendations compare meaning in vector space, while full-text search finds terms and their linguistic forms. Neither endpoint invokes the other.
-
-### API tests
-
-Run `python -m pytest`. API tests use transaction-scoped PostgreSQL sessions and roll back their fixture rows; they do not drop tables or reset the development database. Embedding unit tests mock the model, while vector ordering and full-text behavior run against PostgreSQL. Set `DATABASE_URL` to a dedicated test database if you prefer complete separation.
-
-## Architecture and environment
-
-The backend is organized into FastAPI route modules (`app/api/routes`), Pydantic request/response models (`app/schemas.py`), SQLAlchemy mappings (`app/db/models.py`), authentication and authorization dependencies (`app/api/deps.py`, `app/core/security.py`), and embedding services (`app/services/embeddings.py`). Alembic owns the schema history in `migrations/`. The frontend is a separate Next.js application and is not part of this repository.
-
-Use Python 3.11 or later and PostgreSQL 18 for the target development setup. The PostgreSQL server must have the pgvector extension package installed (the verified database uses pgvector 0.8.6). The migration executes `CREATE EXTENSION IF NOT EXISTS vector`, so the migration role must be allowed to create extensions, or an administrator must run `CREATE EXTENSION vector;` once in the target database before migration. Installing the Python `pgvector` package alone does not install the PostgreSQL extension.
-
-The checked-in `.env.example` lists supported settings. Copy it to `.env` and set `DATABASE_URL` and a private `JWT_SECRET_KEY` of at least 32 characters. Keep `.env` local and never commit it. `CORS_ORIGINS` is a comma-separated exact-origin allowlist; its development default is `http://localhost:3000`. Set it to the frontend origin(s) for your environment, without a trailing slash. Cookies are not used, so credentialed CORS is disabled. The browser may send the `Authorization` and `Content-Type` headers.
-
-| Setting | Purpose |
+| Table | Purpose and important fields |
 | --- | --- |
-| `DATABASE_URL` | SQLAlchemy PostgreSQL URL, for example `postgresql+psycopg://user:password@localhost:5433/mentormatch` |
-| `JWT_SECRET_KEY` | Private signing key, at least 32 characters |
-| `JWT_ALGORITHM` | `HS256` (the application accepts this fixed algorithm) |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Access-token lifetime; defaults to 30, maximum 1440 |
-| `APP_NAME`, `APP_ENV` | Application title and environment label |
-| `CORS_ORIGINS` | Comma-separated browser origins; defaults to `http://localhost:3000` |
+| `departments` | Department lookup: `id` (primary key), unique `name`, optional `description`. Departments are provisioned administratively and read through the API. |
+| `users` | Shared account table for both roles. `role` is `STUDENT` or `FACULTY`; `department_id` references `departments`; `email` is unique; `password_hash` stores a one-way password hash, never the raw password. |
+| `faculty_projects` | Research opportunities owned by faculty through `faculty_id`. Stores title, description, required skill array, `OPEN`/`CLOSED` status, a 384-value semantic embedding, and a full-text `search_vector`. |
+| `student_interests` | A student's description, skills, and semantic embedding. `student_id` is unique, so each student can have at most one profile. The profile is removed if its student account is deleted. |
+| `applications` | A student's message and status for a project. `student_id` and `project_id` reference the applicant and opportunity. A unique constraint on that pair prevents duplicate applications. Status is `PENDING`, `ACCEPTED`, or `REJECTED`. |
 
-Example PowerShell setup (from the repository root, which is this backend directory):
+`users` is intentionally shared by students and faculty; there are no separate student and faculty account tables. The role determines which operations an account may perform. One department can have many users, one faculty member can own many projects, one student can have zero or one interest profile and many applications, and one project can receive many applications.
+
+Foreign-key restrictions preserve department, project, and application history. A student's interest profile cascades with the student account. Database checks constrain roles and statuses, while API authorization ensures faculty can only manage their own projects and applications.
+
+### Search and recommendation data
+
+- `faculty_projects.search_vector` is maintained for PostgreSQL full-text keyword search; a GIN index supports matching titles, descriptions, and skills.
+- `faculty_projects.embedding` and `student_interests.embedding` store 384-dimensional vectors from the same sentence-transformer model. IVFFlat cosine indexes support semantic recommendations.
+- Triggers maintain the project search vector and update timestamps. The schema also defines the `open_projects_with_application_stats` view and the `match_open_projects` database function.
+- `required_skills` and `skills` are PostgreSQL string arrays, keeping each skill list with its owning project or interest profile.
+
+The checked-in demo accounts and records are synthetic. Do not use them as real student, faculty, or research data.
+
+The backend currently returns a maximum of 100 projects per list request. Its project details do not include faculty name/department, and application records include student IDs rather than student profile details. It also has no account-edit, refresh-token, or session-revocation endpoints. The UI documents those limits and does not invent the missing fields.
+
+## Verification
+
+From `backend/`, run `python -m pytest -q` against a configured test database. From `frontend/`, run:
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-# Edit .env locally; do not paste secrets into source files.
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
-alembic upgrade head
-python -m uvicorn app.main:app --reload
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-Open `http://127.0.0.1:8000/docs` for interactive OpenAPI docs. In a second terminal, run `python -m pytest -q`. Check `http://127.0.0.1:8000/health` and `/health/db` for service status. Do not use a database-reset command to prepare tests; the suite is rollback-scoped.
-
-## Frontend integration handoff
-
-Use `http://127.0.0.1:8000/api/v1` as the local API base URL. In browser-side Next.js code, send the access token returned by login on each protected request:
-
-```javascript
-const response = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-  headers: { Authorization: `Bearer ${accessToken}` },
-});
-const profile = await response.json();
-```
-
-Registration accepts `{ "name", "email", "password", "role", "department_id" }` and returns safe profile fields (no hash). Login accepts `{ "email", "password" }` and returns `{ "access_token", "token_type": "bearer", "expires_in", "user" }`. Project creation accepts `{ "title", "description", "required_skills": [] }`; interest writes accept `{ "description", "skills": [] }`; application submission accepts `{ "message" }`. Lists are paginated with `limit` and `offset`; project search uses `q`; recommendations use `limit`. Protected requests use the bearer header. Roles are `STUDENT` and `FACULTY`.
-
-Example login response shape (the token below is illustrative):
-
-```json
-{
-  "access_token": "<signed-access-token>",
-  "token_type": "bearer",
-  "expires_in": 1800,
-  "user": {
-    "id": "<user-uuid>",
-    "name": "Asha Rao",
-    "email": "asha@example.edu",
-    "role": "STUDENT",
-    "department_id": "<department-uuid>",
-    "created_at": "2026-10-14T12:00:00Z"
-  }
-}
-```
-
-An invalid or missing token returns `401`; authenticated users with the wrong role receive `403`; unknown IDs return `404`; duplicate applications, closed-project applications, and invalid status transitions return `409`; malformed fields and invalid pagination return `422`.
-
-When the frontend runs on `http://localhost:3000`, the default CORS allowlist permits browser requests. For another local or deployed frontend origin, add its exact origin to `CORS_ORIGINS` in the backend environment and restart the backend. Start this service with `python -m uvicorn app.main:app --reload`, then start the separate frontend in its own terminal with its Next.js development command and point its API base URL at `http://127.0.0.1:8000/api/v1`. Server-side Next.js requests do not require browser CORS, but still need the base URL and bearer token.
-
-## Troubleshooting and current limits
-
-- `alembic upgrade head` errors mentioning `vector` mean the PostgreSQL server extension package is missing or the database role cannot create it; have the database administrator install/enable pgvector before retrying.
-- First project/interest write may load the MiniLM model and needs cached weights or network access to Hugging Face. When the complete model is already cached but outbound access is blocked, set `HF_HUB_OFFLINE=1` in the backend process environment. The service returns `503` if model initialization/inference is unavailable; it does not save placeholder vectors.
-- A student must create an interest profile before recommendations are available. The API reports `404` if absent and `409` if a zero-vector placeholder remains.
-- Full-text search is lexical and uses PostgreSQL's `english` configuration. Semantic recommendations are model-based cosine ranking. They can produce different orders by design.
-- Faculty registration is currently self-service because the mini-project has no institutional verification workflow. Production deployment should restrict or verify faculty account creation before exposing the service publicly.
-- There is no refresh-token/session-revocation flow or email verification. Access tokens expire; log in again to obtain another token.
-- API routes do not create or edit departments. Seed/maintain departments using an administrator-controlled database process.
-- This is a single-process development setup. IVFFlat index quality and query planning should be reviewed with representative data volume before production use.
-
-## DBMS demonstration
-
-See [docs/DBMS_DEMO.md](docs/DBMS_DEMO.md) for executable catalog queries and rollback-safe demonstrations of keys and constraints, indexes, triggers, the view, stored function, full-text search, vector similarity, and transactions. For schema changes, add a new Alembic revision; do not edit an already-applied migration as a substitute for a new one.
+Then start both services and exercise student and faculty workflows against the configured API. Test results depend on the installed dependencies, PostgreSQL/pgvector service, department data, and (for semantic writes/recommendations) the backend embedding model.
